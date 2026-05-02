@@ -876,14 +876,6 @@ fn send_tcp(ctx: ptr<int>, mac: ptr<u8>, dst_mac: ptr<u8>, buf: ptr<u8>, meta: i
     let payload_len: int = meta >> 8;
     let tcp_len: int = 20 + payload_len;
     let total: int = 20 + tcp_len;
-    if (payload_len > 0) {
-        let req: ptr<char> = \"GET /ip HTTP/1.0\\r\\nHost: ifconfig.me\\r\\n\\r\\n\";
-        let pi: int = 0;
-        while (pi < payload_len) {
-            *(buf + 54 + pi) = *(req + pi);
-            pi = pi + 1;
-        }
-    }
     fill_dst(buf, dst_mac);
     fill_src(buf, mac);
     put_u16(buf, 12, 2048);
@@ -936,6 +928,8 @@ fn wait_synack(buf: ptr<u8>, dst_ip: int) -> int {
 
 fn wait_http(buf: ptr<u8>, dst_ip: int) -> int {
     let tries: int = 0;
+    let header_done: int = 0;
+    let header_state: int = 0;
     while (tries != 2000) {
         let n: int = sys_net_recv(buf, 1518);
         if (n >= 55) {
@@ -944,15 +938,73 @@ fn wait_http(buf: ptr<u8>, dst_ip: int) -> int {
                     if (get_u32(buf, 26) == dst_ip) {
                         if (get_u16(buf, 36) == 49153) {
                             let ihl: int = (*(buf + 14) & 15) * 4;
-                            let thl: int = (*(buf + 14 + ihl + 12) >> 4) * 4;
+                            let tcp_off: int = 14 + ihl;
+                            let thl: int = (*(buf + tcp_off + 12) >> 4) * 4;
                             let total: int = get_u16(buf, 16);
                             let off: int = 14 + ihl + thl;
                             let len: int = total - ihl - thl;
-                            if (len > 0) {
-                                if (len > 512) { len = 512; }
-                                print_buf(buf + off, len);
-                                print_str(\"\\n\");
-                                return 0;
+                            let body_off: int = off;
+                            let body_len: int = 0;
+                            if (total <= n - 14) {
+                                if (len > 0) {
+                                    if (header_done != 0) {
+                                        body_len = len;
+                                    } else {
+                                        let i: int = 0;
+                                        while (i < len) {
+                                            let ch: int = *(buf + off + i);
+                                            if (header_state == 0) {
+                                                if (ch == 13) { header_state = 1; }
+                                            } else {
+                                                if (header_state == 1) {
+                                                    if (ch == 10) {
+                                                        header_state = 2;
+                                                    } else {
+                                                        if (ch == 13) {
+                                                            header_state = 1;
+                                                        } else {
+                                                            header_state = 0;
+                                                        }
+                                                    }
+                                                } else {
+                                                    if (header_state == 2) {
+                                                        if (ch == 13) {
+                                                            header_state = 3;
+                                                        } else {
+                                                            header_state = 0;
+                                                        }
+                                                    } else {
+                                                        if (ch == 10) {
+                                                            header_done = 1;
+                                                            body_off = off + i + 1;
+                                                            body_len = len - i - 1;
+                                                            break;
+                                                        } else {
+                                                            if (ch == 13) {
+                                                                header_state = 1;
+                                                            } else {
+                                                                header_state = 0;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            i = i + 1;
+                                        }
+                                    }
+                                    if (body_len > 0) {
+                                        if (body_len > 512) { body_len = 512; }
+                                        print_buf(buf + body_off, body_len);
+                                        print_str(\"\\n\");
+                                        return 0;
+                                    }
+                                }
+                                if ((*(buf + tcp_off + 13) & 1) == 1) {
+                                    if (header_done != 0) {
+                                        print_str(\"\\n\");
+                                        return 0;
+                                    }
+                                }
                             }
                         }
                     }
@@ -1055,14 +1107,13 @@ fn main() -> int {
     let rc: int = 0;
     let ai: int = 0;
     let si: int = 0;
-    let have_ip: int = 0;
     if (buf == 0) { print_str(\"http: alloc failed\\n\"); return 1; }
     if (sys_net_info_raw(buf) < 0) { print_str(\"http: net_info failed\\n\"); return 1; }
     if (*(buf + 0) == 0) { print_str(\"http: network device not ready\\n\"); return 1; }
     mac[0] = *(buf + 8); mac[1] = *(buf + 9); mac[2] = *(buf + 10);
     mac[3] = *(buf + 11); mac[4] = *(buf + 12); mac[5] = *(buf + 13);
     copy_str_cap(&host, \"ifconfig.me\", 64);
-    copy_str_cap(&path, \"/\", 64);
+    copy_str_cap(&path, \"/ip\", 64);
     clear_chars(&addr, 64);
     if (sys_args(&args, 128) > 0) {
         clear_chars(&host, 64);
@@ -1119,20 +1170,34 @@ fn main() -> int {
     print_str(\" \");
     print_str(&path);
     print_str(\"\\n\");
-    send_arp(&mac, ip_be, gateway_be, buf);
+    rc = send_arp(&mac, ip_be, gateway_be, buf);
+    if (rc < 0) { print_str(\"http: gateway ARP send failed\\n\"); return 1; }
     rc = recv_arp(gateway_be, buf, &gw_mac);
-    dst_ip = 580939665;
-    have_ip = 1;
+    if (rc < 0) { print_str(\"http: gateway ARP timeout\\n\"); return 1; }
+    if (addr[0] != 0) {
+        dst_ip = parse_ipv4(&addr);
+        if (dst_ip == 0) { print_str(\"http: bad connect-ip\\n\"); return 1; }
+    } else {
+        print_str(\"dns lookup\\n\");
+        rc = send_dns(&mac, &gw_mac, buf, &host);
+        if (rc < 0) { print_str(\"http: dns send failed\\n\"); return 1; }
+        dst_ip = wait_dns(buf, dns_ip);
+        if (dst_ip == 0) { print_str(\"http: dns timeout\\n\"); return 1; }
+    }
     ctx[0] = ip_be;
     ctx[1] = dst_ip;
     ctx[2] = seq;
     ctx[3] = 0;
     print_str(\"tcp connect\\n\");
     rc = send_tcp(&ctx, &mac, &gw_mac, buf, 2);
+    if (rc < 0) { print_str(\"http: tcp syn send failed\\n\"); return 1; }
     server_seq = wait_synack(buf, dst_ip);
+    if (server_seq == 0) { print_str(\"http: tcp connect timeout\\n\"); return 1; }
     ctx[2] = seq + 1;
     ctx[3] = server_seq + 1;
-    rc = send_tcp(&ctx, &mac, &gw_mac, buf, 10008);
+    payload_len = write_http_payload(buf, &host, &path);
+    rc = send_tcp(&ctx, &mac, &gw_mac, buf, 24 | (payload_len << 8));
+    if (rc < 0) { print_str(\"http: request send failed\\n\"); return 1; }
     rc = wait_http(buf, dst_ip);
     if (rc != 0) { print_str(\"http: response timeout\\n\"); return 1; }
     syscall2(24, buf, 1);
