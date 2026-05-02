@@ -47,7 +47,7 @@ KERNEL_OBJS := \
 	$(BUILD)/kernel/block.o \
 	$(BUILD)/kernel/user.o
 
-.PHONY: all build image disk disk-reset run run-gui clean check-tools
+.PHONY: all build image disk disk-reset run run-gui check clean check-tools
 
 all: image
 
@@ -172,6 +172,9 @@ disk: $(BUILD)/orec-host
 disk-reset: $(BUILD)/orec-host
 	rm -f $(DISK)
 	python3 tools/mkorefs.py $(DISK) $(BUILD)/orec-host
+
+check: disk
+	python3 tools/test_http_app.py
 
 image: check-tools $(BUILD)/BOOTX64.EFI $(BUILD)/kernel.elf $(BUILD)/initramfs.tar disk
 	@command -v mformat >/dev/null || { echo "missing mtools: sudo apt install mtools"; exit 1; }
