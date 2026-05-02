@@ -1,0 +1,17 @@
+Ore is an educational x86_64 operating system.
+
+Current focus:
+- stable ring3 syscall ABI
+- initramfs shell
+- simple interactive environment
+
+The roadmap is intentionally small and direct. First we keep the kernel honest:
+clear syscall ABI, guarded user pointers, controlled page faults, process
+metadata, and file handles with real offsets. Then the shell grows into a
+small workspace with commands, docs, demos, and eventually an in-system
+programming layer.
+
+This file is deliberately longer than one userspace read buffer. It verifies
+that open/read/close keep per-handle offsets instead of returning only the first
+chunk of a file. If cat can print this whole paragraph, the VFS handle path is
+already more useful than the first MVP shortcut.

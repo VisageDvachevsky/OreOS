@@ -1,0 +1,2 @@
+Ore initramfs placeholder.
+Userspace is intentionally not implemented yet.
